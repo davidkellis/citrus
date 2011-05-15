@@ -333,15 +333,10 @@ module Citrus
   class LeftRecursiveMemoizedInput < MemoizedInput
     def initialize(string)
       super(string)
+      @count = 0
       @call_stack = []
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
-      @growing = Hash.new {|hash, key| hash[key] = Hash.new }
     end
-    
-    # growing is a map <R, <P, seed>> from rules to maps of input positions to
-    # seeds at that input position. This is used to record the ongoing growth of a seed
-    # for a rule R at input position P.
-    attr_reader :growing
     
     # call_stack is a stack [<R, P>, ...] that stores a list of (rule, position) pairs
     # representing each rule invocation.
@@ -355,7 +350,6 @@ module Citrus
     def reset # :nodoc:
       @call_stack.clear
       @call_stack_indices.clear
-      @growing.clear
       super
     end
     
@@ -367,13 +361,26 @@ module Citrus
   private
 
     def apply_rule(rule, position, events) # :nodoc:
+      @count += 1
+      count = @count
+      
       memo = @cache[rule] ||= {}
 
-      # puts '***'
-      # puts rule.inspect
-      # puts rule.class
+      puts '---'
+      puts "count = #{count}"
+      puts "name = #{rule.name}"
+      puts rule.inspect
+      puts rule.class
+      puts position
+      puts events.inspect
+
+      this_is_a_left_recursive_call = call_stack_includes?(rule, position)
+
+      call_stack_push(rule, position)
 
       if memo[position]
+        puts "count = #{count}"
+        puts "memo[position] = #{memo[position]}"
         @cache_hits += 1
         c = memo[position]
         unless c.empty?
@@ -381,19 +388,101 @@ module Citrus
           self.pos += events[-1]
         end
       else
-        index = events.size
-        # rule.exec(self, events)
-        
-        tratt_apply_rule(rule, position, events)
-        
-        # Memoize the result so we can use it next time this same rule is
-        # executed at this position.
-        memo[position] = events.slice(index, events.size)
-        
-        # parse_events = tratt_apply_rule(rule, position, events)
-        # events.concat(parse_events) unless parse_events.empty?
-        # memo[position] = parse_events
+        ####################################### START
+        # This is Algorithm 1 from 
+        # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
+        case
+          # left-recursion is occuring: rule is calling itself, so return the seed
+          # when rule == orig_rule && growing[rule].include?(position)
+          # when this_is_a_left_recursive_call && growing[rule].include?(position)
+          #   puts '1'
+          #   call_stack_pop
+          # 
+          #   puts events.inspect
+          #   puts '---111'
+          # 
+          #   # return growing[rule][position]
+          #   return
+
+          # left-recursion has not yet occurred but is about to begin - this is triggered when
+          #   no input has been consumed, detected when P has not advanced over orig_pos
+          # when rule == orig_rule && position = orig_pos
+          when this_is_a_left_recursive_call
+            # Set up the base case (the non-recursive case):
+            # initialize the seed value to nil so that if / when left-recursion happens for 
+            #   this rule at this input position, the initial left-recursion will fail.
+            memo[position] = []    # store an empty parse tree - Tratt uses 'null' to represent an empty tree
+
+            # we are now switching parsing modes, changing from top-down mode to Warth-style
+            #   iterative bottom-up mode.
+            # From Tratt's paper:
+            #   In essence, we continually re-evaluate the rule 'rule' at input position 'position' 
+            #   (note that 'position' does not advance); each time this re-evaluation is successful,
+            #   we update the seed in memo[position]. As expected, this means that each 
+            #   update of the seed includes within it the previous seed.
+            while true
+              puts '2'
+
+              # invoke the same rule another recursive time (the current invocation is the first recursive time)
+              # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
+              index = events.size
+              rule.exec(self, events)
+              result = events.slice(index, events.size)
+
+              seed = memo[position]
+
+              # This explains the following 'if' statement:
+              # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
+              # re-evaluation fails completely; OR if the result returned by re-evaluation consumes less
+              # of the input than the current seed (if one exists). The former case is trivial (though
+              # note that, by definition, it can only trigger on the first attempt at left-recursion). The
+              # latter is less obvious, and is not explained in depth by Warth et al. Intuitively, if a left-
+              # recursive call returns a 'shorter' result than the previous known one, then by definition
+              # it has not used the current seed; in other words, the left-recursion must have exhausted
+              # itself.
+              if result.empty? ||                   # case 1: evaluation has failed completely
+                 result.size < seed.size            # case 2: result consumes less input than the current seed
+                 
+                # memo.delete(position)
+
+                puts events.inspect
+                puts "count = #{count}"
+                puts '---222'
+
+                break
+              end
+
+              puts "RECURSIVE CASE"
+              puts "count = #{count}"
+              puts "name = #{rule.name}"
+              puts "result = #{result.inspect}"
+              
+              memo[position] = result
+              self.pos = position                   # we must backtrack to the original position, 'position'
+              events.slice!(index, events.size)     # remove whatever result was appended to events
+            end
+
+          # left-recursion is not occuring - rule is not calling itself left-recursively
+          # do do everything normally - traditional PEG rule application
+          else
+            puts '3'
+
+            index = events.size
+            rule.exec(self, events)
+
+            # Memoize the result so we can use it next time this same rule is
+            # executed at this position.
+            memo[position] = events.slice(index, events.size)
+
+            puts events.inspect
+            puts "count = #{count}"
+            puts '---333'
+        end
+
+        ####################################### END
       end
+      
+      call_stack_pop
 
       events
     end
@@ -418,111 +507,6 @@ module Citrus
       pair = call_stack.pop
       call_stack_indices[pair].delete(call_stack.length)
       pair
-    end
-
-    # This is Algorithm 1 from 
-    # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
-    def tratt_apply_rule(rule, position, events) # :nodoc:
-      puts '---'
-      puts "name = #{rule.name}"
-      puts rule.inspect
-      puts rule.class
-      puts position
-      puts events.inspect
-      
-      memo = @cache[rule] ||= {}
-      
-      this_is_a_left_recursive_call = call_stack_includes?(rule, position)
-      
-      call_stack_push(rule, position)
-      
-      start_size = events.size
-      new_events = []
-      
-      # This is Algorithm 1 from 
-      # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
-      case
-        # left-recursion is occuring: rule is calling itself, so return the seed
-        # when rule == orig_rule && growing[rule].include?(position)
-        when this_is_a_left_recursive_call && growing[rule].include?(position)
-          puts '1'
-          call_stack_pop
-
-          puts events.inspect
-          puts '---111'
-
-          return growing[rule][position]
-        
-        # left-recursion has not yet occurred but is about to begin - this is triggered when
-        #   no input has been consumed, detected when P has not advanced over orig_pos
-        # when rule == orig_rule && position = orig_pos
-        when this_is_a_left_recursive_call
-          # initialize the seed value to nil so that if / when left-recursion happens for 
-          #   this rule at this input position, the initial left-recursion will fail.
-          growing[rule][position] = []    # store an empty parse tree - Tratt uses 'null' to represent no tree
-          
-          # we are now switching parsing modes, changing from top-down mode to Warth-style
-          #   iterative bottom-up mode.
-          # From Tratt's paper:
-          #   In essence, we continually re-evaluate the rule 'rule' at input position 'position' 
-          #   (note that 'position' does not advance); each time this re-evaluation is successful,
-          #   we update the seed in growing[rule][position]. As expected, this means that each 
-          #   update of the seed includes within it the previous seed.
-          while true
-            puts '2'
-            
-            # result = tratt_apply_rule(rule, position, events)
-            index = events.size
-            rule.exec(self, events)
-            result = events.slice(index, events.size)
-            
-            seed = growing[rule][position]
-            
-            # This explains the following 'if' statement:
-            # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
-            # re-evaluation fails completely; OR if the result returned by re-evaluation consumes less
-            # of the input than the current seed (if one exists). The former case is trivial (though
-            # note that, by definition, it can only trigger on the first attempt at left-recursion). The
-            # latter is less obvious, and is not explained in depth by Warth et al. Intuitively, if a left-
-            # recursive call returns a 'shorter' result than the previous known one, then by definition
-            # it has not used the current seed; in other words, the left-recursion must have exhausted
-            # itself.
-            if result.empty? ||                   # case 1: evaluation has failed completely
-               result.size < seed.size            # case 2: result consumes less input than the current seed
-              growing[rule].delete(position)
-              call_stack_pop
-              
-              puts events.inspect
-              puts '---222'
-              
-              return seed
-            end
-          
-            growing[rule][position] = result
-          end
-        
-        # left-recursion is not occuring - rule is not calling itself left-recursively
-        # do do everything normally - traditional PEG rule application
-        else
-          puts '3'
-
-          index = events.size
-          rule.exec(self, events)
-
-          # Memoize the result so we can use it next time this same rule is
-          # executed at this position.
-          memo[position] = new_events = events.slice(index, events.size)
-
-          # Memoize the result so we can use it next time this same rule is
-          # executed at this position.
-          # memo[position] = new_events
-      end
-
-      call_stack_pop
-      puts events.inspect
-      puts '---333'
-
-      new_events
     end
   end
 
