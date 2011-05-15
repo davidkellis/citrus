@@ -3,6 +3,7 @@
 require 'strscan'
 require 'pathname'
 require 'citrus/version'
+require 'set'
 
 # Citrus is a compact and powerful parsing library for Ruby that combines the
 # elegance and expressiveness of the language with the simplicity and power of
@@ -245,9 +246,12 @@ module Citrus
       position = pos
       index = events.size
 
+      # if the rule matches some input, then update the max_offset
       if apply_rule(rule, position, events).size > index
         @max_offset = pos if pos > @max_offset
       else
+        # if the rule does NOT match any input, then reset the StringScanner
+        # position back to what it was before the rule was invoked
         self.pos = position
       end
 
@@ -323,6 +327,202 @@ module Citrus
       end
 
       events
+    end
+  end
+  
+  class LeftRecursiveMemoizedInput < MemoizedInput
+    def initialize(string)
+      super(string)
+      @call_stack = []
+      @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
+      @growing = Hash.new {|hash, key| hash[key] = Hash.new }
+    end
+    
+    # growing is a map <R, <P, seed>> from rules to maps of input positions to
+    # seeds at that input position. This is used to record the ongoing growth of a seed
+    # for a rule R at input position P.
+    attr_reader :growing
+    
+    # call_stack is a stack [<R, P>, ...] that stores a list of (rule, position) pairs
+    # representing each rule invocation.
+    attr_reader :call_stack
+    
+    # call_stack_indices is a map <[R, P], Set<integer>> from a [rule, position] pair to
+    # a set of index positions, each of which is an index at which that [rule, position]
+    # pair occurs in the call_stack
+    attr_reader :call_stack_indices
+
+    def reset # :nodoc:
+      @call_stack.clear
+      @call_stack_indices.clear
+      @growing.clear
+      super
+    end
+    
+    # def exec(rule, events=[])
+    #   events.push([rule, pos]) if events.empty?
+    #   super
+    # end
+    
+  private
+
+    def apply_rule(rule, position, events) # :nodoc:
+      memo = @cache[rule] ||= {}
+
+      # puts '***'
+      # puts rule.inspect
+      # puts rule.class
+
+      if memo[position]
+        @cache_hits += 1
+        c = memo[position]
+        unless c.empty?
+          events.concat(c)
+          self.pos += events[-1]
+        end
+      else
+        index = events.size
+        # rule.exec(self, events)
+        
+        tratt_apply_rule(rule, position, events)
+        
+        # Memoize the result so we can use it next time this same rule is
+        # executed at this position.
+        memo[position] = events.slice(index, events.size)
+        
+        # parse_events = tratt_apply_rule(rule, position, events)
+        # events.concat(parse_events) unless parse_events.empty?
+        # memo[position] = parse_events
+      end
+
+      events
+    end
+
+    def call_stack_includes?(rule, position)
+      !call_stack_indices[ [rule, position] ].empty?
+    end
+
+    def call_stack_push(rule, position)
+      rule_pos_pair = [rule, position]
+      
+      # push the given rule and position onto the call stack
+      call_stack.push rule_pos_pair
+      
+      # add the call stack index at which the pair was just added to the set of indices at which the pair exists in the call stack
+      call_stack_indices[rule_pos_pair] << call_stack.length - 1
+      
+      call_stack
+    end
+    
+    def call_stack_pop
+      pair = call_stack.pop
+      call_stack_indices[pair].delete(call_stack.length)
+      pair
+    end
+
+    # This is Algorithm 1 from 
+    # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
+    def tratt_apply_rule(rule, position, events) # :nodoc:
+      puts '---'
+      puts "name = #{rule.name}"
+      puts rule.inspect
+      puts rule.class
+      puts position
+      puts events.inspect
+      
+      memo = @cache[rule] ||= {}
+      
+      this_is_a_left_recursive_call = call_stack_includes?(rule, position)
+      
+      call_stack_push(rule, position)
+      
+      start_size = events.size
+      new_events = []
+      
+      # This is Algorithm 1 from 
+      # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
+      case
+        # left-recursion is occuring: rule is calling itself, so return the seed
+        # when rule == orig_rule && growing[rule].include?(position)
+        when this_is_a_left_recursive_call && growing[rule].include?(position)
+          puts '1'
+          call_stack_pop
+
+          puts events.inspect
+          puts '---111'
+
+          return growing[rule][position]
+        
+        # left-recursion has not yet occurred but is about to begin - this is triggered when
+        #   no input has been consumed, detected when P has not advanced over orig_pos
+        # when rule == orig_rule && position = orig_pos
+        when this_is_a_left_recursive_call
+          # initialize the seed value to nil so that if / when left-recursion happens for 
+          #   this rule at this input position, the initial left-recursion will fail.
+          growing[rule][position] = []    # store an empty parse tree - Tratt uses 'null' to represent no tree
+          
+          # we are now switching parsing modes, changing from top-down mode to Warth-style
+          #   iterative bottom-up mode.
+          # From Tratt's paper:
+          #   In essence, we continually re-evaluate the rule 'rule' at input position 'position' 
+          #   (note that 'position' does not advance); each time this re-evaluation is successful,
+          #   we update the seed in growing[rule][position]. As expected, this means that each 
+          #   update of the seed includes within it the previous seed.
+          while true
+            puts '2'
+            
+            # result = tratt_apply_rule(rule, position, events)
+            index = events.size
+            rule.exec(self, events)
+            result = events.slice(index, events.size)
+            
+            seed = growing[rule][position]
+            
+            # This explains the following 'if' statement:
+            # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
+            # re-evaluation fails completely; OR if the result returned by re-evaluation consumes less
+            # of the input than the current seed (if one exists). The former case is trivial (though
+            # note that, by definition, it can only trigger on the first attempt at left-recursion). The
+            # latter is less obvious, and is not explained in depth by Warth et al. Intuitively, if a left-
+            # recursive call returns a 'shorter' result than the previous known one, then by definition
+            # it has not used the current seed; in other words, the left-recursion must have exhausted
+            # itself.
+            if result.empty? ||                   # case 1: evaluation has failed completely
+               result.size < seed.size            # case 2: result consumes less input than the current seed
+              growing[rule].delete(position)
+              call_stack_pop
+              
+              puts events.inspect
+              puts '---222'
+              
+              return seed
+            end
+          
+            growing[rule][position] = result
+          end
+        
+        # left-recursion is not occuring - rule is not calling itself left-recursively
+        # do do everything normally - traditional PEG rule application
+        else
+          puts '3'
+
+          index = events.size
+          rule.exec(self, events)
+
+          # Memoize the result so we can use it next time this same rule is
+          # executed at this position.
+          memo[position] = new_events = events.slice(index, events.size)
+
+          # Memoize the result so we can use it next time this same rule is
+          # executed at this position.
+          # memo[position] = new_events
+      end
+
+      call_stack_pop
+      puts events.inspect
+      puts '---333'
+
+      new_events
     end
   end
 
@@ -609,24 +809,36 @@ module Citrus
     def default_options # :nodoc:
       { :consume  => true,
         :memoize  => false,
-        :offset   => 0
+        :offset   => 0,
+        :left_recurse => false
       }
     end
 
     # Attempts to parse the given +string+ and return a Match if any can be
     # made. +options+ may contain any of the following keys:
     #
-    # consume::   If this is +true+ a ParseError will be raised unless the
-    #             entire input string is consumed. Defaults to +true+.
-    # memoize::   If this is +true+ the matches generated during a parse are
-    #             memoized. See MemoizedInput for more information. Defaults to
-    #             +false+.
-    # offset::    The offset in +string+ at which to start parsing. Defaults
-    #             to 0.
+    # consume::       If this is +true+ a ParseError will be raised unless the
+    #                 entire input string is consumed. Defaults to +true+.
+    # left_recurse::  If this is +true+ the matches generated during a parse are
+    #                 memoized, and Rules may make use of left-recursion. For
+    #                 example: e = e + e | int
+    #                 Defaults to +false+.
+    # memoize::       If this is +true+ the matches generated during a parse are
+    #                 memoized. See MemoizedInput for more information. Defaults to
+    #                 +false+.
+    # offset::        The offset in +string+ at which to start parsing. Defaults
+    #                 to 0.
     def parse(string, options={})
       opts = default_options.merge(options)
 
-      input = (opts[:memoize] ? MemoizedInput : Input).new(string)
+      input = case
+        when opts[:left_recurse]
+          LeftRecursiveMemoizedInput
+        when opts[:memoize]
+          MemoizedInput
+        else
+          Input
+      end.new(string)
       input.pos = opts[:offset] if opts[:offset] > 0
 
       events = input.exec(self)
@@ -745,6 +957,7 @@ module Citrus
       index = events.size
 
       if input.exec(rule, events).size > index
+        puts "Matched #{self.class}"
         # Proxy objects insert themselves into the event stream in place of the
         # rule they are proxy for.
         events[index] = self
@@ -857,6 +1070,7 @@ module Citrus
       match = input.scan(@regexp)
 
       if match
+        puts "Matched #{self.class}"
         events << self
         events << CLOSE
         events << match.length
@@ -1177,9 +1391,13 @@ module Citrus
       end
 
       if n == m
+        puts "Matched #{self.class}"
         events << CLOSE
         events << length
       else
+        puts "FAILED #{self.class}"
+        puts "n = #{n}"
+        puts "m = #{m}"
         events.slice!(start, index)
       end
 
@@ -1213,9 +1431,11 @@ module Citrus
       end
 
       if index < events.size
+        puts "Matched #{self.class}"
         events << CLOSE
         events << events[-2]
       else
+        puts "FAILED #{self.class}"
         events.pop
       end
 
