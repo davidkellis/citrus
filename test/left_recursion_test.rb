@@ -5,12 +5,10 @@ class LeftRecursionTest < Test::Unit::TestCase
     grammar = Grammar.new {
       rule(:a) { 'a' }
       rule(:b) { 'b' }
-      rule(:c) { 'c' }
-      rule(:z) { 'z' }
-      rule(:s) { any([:s, :a, :b, :c], :z) }
+      rule(:s) { any([:s, :b], :a) }
     }
     
-    match = grammar.parse("zabcabcabc", :consume => true, :left_recurse => true, :root => :s)
+    match = grammar.parse("abb", :consume => true, :left_recurse => true, :root => :s)
     assert(match)
     
     # input = LeftRecursiveMemoizedInput.new()

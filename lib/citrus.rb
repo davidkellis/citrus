@@ -334,6 +334,7 @@ module Citrus
     def initialize(string)
       super(string)
       @count = 0
+      @memoization_enabled = true
       @call_stack = []
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
     end
@@ -346,8 +347,11 @@ module Citrus
     # a set of index positions, each of which is an index at which that [rule, position]
     # pair occurs in the call_stack
     attr_reader :call_stack_indices
+    
+    attr_reader :memoization_enabled
 
     def reset # :nodoc:
+      @memoization_enabled = true
       @call_stack.clear
       @call_stack_indices.clear
       super
@@ -360,27 +364,40 @@ module Citrus
     
   private
 
+    def this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
+      call_stack_indices[ [rule, position] ].size == 1
+    end
+
+    def enable_memoization
+      @memoization_enabled = true
+    end
+
+    def disable_memoization
+      @memoization_enabled = false
+    end
+
     def apply_rule(rule, position, events) # :nodoc:
       @count += 1
       count = @count
       
       memo = @cache[rule] ||= {}
 
-      puts '---'
-      puts "count = #{count}"
-      puts "name = #{rule.name}"
-      puts rule.inspect
-      puts rule.class
-      puts position
-      puts events.inspect
+      puts "apply_rule(#{rule} - ##{rule.object_id}, #{position}, #{events})"
+      # puts '---'
+      # puts "count = #{count}"
+      # puts "name = #{rule.name}"
+      # puts rule.inspect
+      # puts rule.class
+      # puts position
+      # puts events.inspect
 
       this_is_a_left_recursive_call = call_stack_includes?(rule, position)
 
       call_stack_push(rule, position)
 
       if memo[position]
-        puts "count = #{count}"
-        puts "memo[position] = #{memo[position]}"
+        # puts "count = #{count}"
+        puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
         @cache_hits += 1
         c = memo[position]
         unless c.empty?
@@ -388,22 +405,9 @@ module Citrus
           self.pos += events[-1]
         end
       else
-        ####################################### START
         # This is Algorithm 1 from 
         # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
         case
-          # left-recursion is occuring: rule is calling itself, so return the seed
-          # when rule == orig_rule && growing[rule].include?(position)
-          # when this_is_a_left_recursive_call && growing[rule].include?(position)
-          #   puts '1'
-          #   call_stack_pop
-          # 
-          #   puts events.inspect
-          #   puts '---111'
-          # 
-          #   # return growing[rule][position]
-          #   return
-
           # left-recursion has not yet occurred but is about to begin - this is triggered when
           #   no input has been consumed, detected when P has not advanced over orig_pos
           # when rule == orig_rule && position = orig_pos
@@ -411,8 +415,12 @@ module Citrus
             # Set up the base case (the non-recursive case):
             # initialize the seed value to nil so that if / when left-recursion happens for 
             #   this rule at this input position, the initial left-recursion will fail.
-            memo[position] = []    # store an empty parse tree - Tratt uses 'null' to represent an empty tree
+            # store an empty parse tree - Tratt uses 'null' to represent an empty tree
+            memo[position] = [] if memoization_enabled
+            puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"  if memoization_enabled
 
+            disable_memoization
+            
             # we are now switching parsing modes, changing from top-down mode to Warth-style
             #   iterative bottom-up mode.
             # From Tratt's paper:
@@ -421,7 +429,7 @@ module Citrus
             #   we update the seed in memo[position]. As expected, this means that each 
             #   update of the seed includes within it the previous seed.
             while true
-              puts '2'
+              puts 'lr rule application'
 
               # invoke the same rule another recursive time (the current invocation is the first recursive time)
               # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
@@ -430,6 +438,12 @@ module Citrus
               result = events.slice(index, events.size)
 
               seed = memo[position]
+              
+              # if the invocation of the parent rule was a recursive invocation, then memoization has been turned
+              # off, so the seed will be nil for this child rule's invocation, but the child rule is also treated as
+              # a recursive invocation because it appears at least once before in the call stack. We want to turn
+              # off position backtracking (lines 471 and 472) for all rules except the one original recursive call.
+              break if seed.nil?
 
               # This explains the following 'if' statement:
               # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
@@ -440,24 +454,25 @@ module Citrus
               # recursive call returns a 'shorter' result than the previous known one, then by definition
               # it has not used the current seed; in other words, the left-recursion must have exhausted
               # itself.
+              puts "result = #{result.inspect}"
+              puts "seed = cache[#{rule} - ##{rule.object_id}][#{position}] = #{seed.inspect}"
               if result.empty? ||                   # case 1: evaluation has failed completely
-                 result.size < seed.size            # case 2: result consumes less input than the current seed
+                 result[-1] < (seed[-1] || 0)       # case 2: result consumes less input than the current seed
                  
-                # memo.delete(position)
-
-                puts events.inspect
-                puts "count = #{count}"
-                puts '---222'
+                enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
+                
+                puts 'RETURNING'
+                events.slice!(index, events.size)     # remove whatever result was appended to events
+                unless seed.empty?
+                  events.concat(seed)
+                end
 
                 break
               end
 
-              puts "RECURSIVE CASE"
-              puts "count = #{count}"
-              puts "name = #{rule.name}"
-              puts "result = #{result.inspect}"
-              
               memo[position] = result
+              
+              # backtrack and run the same rule again
               self.pos = position                   # we must backtrack to the original position, 'position'
               events.slice!(index, events.size)     # remove whatever result was appended to events
             end
@@ -465,28 +480,25 @@ module Citrus
           # left-recursion is not occuring - rule is not calling itself left-recursively
           # do do everything normally - traditional PEG rule application
           else
-            puts '3'
+            puts 'normal rule application'
 
             index = events.size
             rule.exec(self, events)
 
-            # Memoize the result so we can use it next time this same rule is
-            # executed at this position.
-            memo[position] = events.slice(index, events.size)
-
-            puts events.inspect
-            puts "count = #{count}"
-            puts '---333'
+            if memoization_enabled
+              puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{events.slice(index, events.size)} at position #{position}"
+              # Memoize the result so we can use it next time this same rule is
+              # executed at this position.
+              memo[position] = events.slice(index, events.size)
+            end
         end
-
-        ####################################### END
       end
       
       call_stack_pop
 
       events
     end
-
+    
     def call_stack_includes?(rule, position)
       !call_stack_indices[ [rule, position] ].empty?
     end
@@ -828,6 +840,12 @@ module Citrus
       events = input.exec(self)
       length = events[-1]
 
+      puts '==='
+      puts events
+      puts '==='
+      puts length
+      puts (string.length - opts[:offset])
+      
       if !length || (opts[:consume] && length < (string.length - opts[:offset]))
         raise ParseError, input
       end
@@ -938,13 +956,17 @@ module Citrus
 
     # Returns an array of events for this rule on the given +input+.
     def exec(input, events=[])
+      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
+      
       index = events.size
 
       if input.exec(rule, events).size > index
-        puts "Matched #{self.class}"
+        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         # Proxy objects insert themselves into the event stream in place of the
         # rule they are proxy for.
         events[index] = self
+      else
+        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
       events
@@ -1051,13 +1073,16 @@ module Citrus
 
     # Returns an array of events for this rule on the given +input+.
     def exec(input, events=[])
+      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       match = input.scan(@regexp)
 
       if match
-        puts "Matched #{self.class}"
+        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         events << self
         events << CLOSE
         events << match.length
+      else
+        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
       events
@@ -1361,6 +1386,7 @@ module Citrus
 
     # Returns an array of events for this rule on the given +input+.
     def exec(input, events=[])
+      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       events << self
 
       index = events.size
@@ -1375,11 +1401,11 @@ module Citrus
       end
 
       if n == m
-        puts "Matched #{self.class}"
+        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         events << CLOSE
         events << length
       else
-        puts "FAILED #{self.class}"
+        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
         puts "n = #{n}"
         puts "m = #{m}"
         events.slice!(start, index)
@@ -1404,6 +1430,7 @@ module Citrus
 
     # Returns an array of events for this rule on the given +input+.
     def exec(input, events=[])
+      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       events << self
 
       index = events.size
@@ -1415,11 +1442,11 @@ module Citrus
       end
 
       if index < events.size
-        puts "Matched #{self.class}"
+        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         events << CLOSE
         events << events[-2]
       else
-        puts "FAILED #{self.class}"
+        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
         events.pop
       end
 
