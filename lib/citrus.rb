@@ -242,12 +242,14 @@ module Citrus
     # Returns an array of events for the given +rule+ at the current pointer
     # position. Objects in this array may be one of three types: a Rule,
     # Citrus::CLOSE, or a length (integer).
-    def exec(rule, events=[])
+    def exec(rule)
       position = pos
-      index = events.size
+
+      # a side effect of calling apply_rule is that the input position (self.pos) may be modified
+      parse_tree = apply_rule(rule, position)
 
       # if the rule matches some input, then update the max_offset
-      if apply_rule(rule, position, events).size > index
+      if parse_tree.size > 0
         @max_offset = pos if pos > @max_offset
       else
         # if the rule does NOT match any input, then reset the StringScanner
@@ -255,23 +257,27 @@ module Citrus
         self.pos = position
       end
 
-      events
+      parse_tree
     end
 
     # Returns the length of a match for the given +rule+ at the current pointer
     # position, +nil+ if none can be made.
     def test(rule)
       position = pos
-      events = apply_rule(rule, position, [])
+      parse_tree = apply_rule(rule, position)
       self.pos = position
-      events[-1]
+      if parse_tree.size > 0
+        parse_tree[-1]
+      else
+        0
+      end
     end
 
   private
 
     # Appends all events for +rule+ at the given +position+ to +events+.
-    def apply_rule(rule, position, events)
-      rule.exec(self, events)
+    def apply_rule(rule, position)
+      rule.exec(self)
     end
   end
 
@@ -307,23 +313,24 @@ module Citrus
 
   private
 
-    def apply_rule(rule, position, events) # :nodoc:
+    def apply_rule(rule, position) # :nodoc:
+      events = []
+      
       memo = @cache[rule] ||= {}
 
       if memo[position]
         @cache_hits += 1
         c = memo[position]
         unless c.empty?
-          events.concat(c)
+          events = c
           self.pos += events[-1]
         end
       else
         index = events.size
-        rule.exec(self, events)
+        events = rule.exec(self)
 
-        # Memoize the result so we can use it next time this same rule is
-        # executed at this position.
-        memo[position] = events.slice(index, events.size)
+        # Memoize the result so we can use it next time this same rule is executed at this position.
+        memo[position] = events
       end
 
       events
@@ -394,6 +401,7 @@ module Citrus
       this_is_a_left_recursive_call = call_stack_includes?(rule, position)
 
       call_stack_push(rule, position)
+      call_stack_index = call_stack.size - 1
 
       if memo[position]
         # puts "count = #{count}"
@@ -462,10 +470,18 @@ module Citrus
                 enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
                 
                 puts 'RETURNING'
+                puts "events = #{events.inspect}"
                 events.slice!(index, events.size)     # remove whatever result was appended to events
+                puts "events = #{events.inspect}"
+                puts "position = #{position}"
+                puts "pos = #{self.pos}"
                 unless seed.empty?
                   events.concat(seed)
+                  self.pos = seed[-1]
                 end
+                puts "events = #{events.inspect}"
+                puts "position = #{position}"
+                puts "pos = #{self.pos}"
 
                 break
               end
@@ -481,10 +497,24 @@ module Citrus
           # do do everything normally - traditional PEG rule application
           else
             puts 'normal rule application'
-
+            
             index = events.size
             rule.exec(self, events)
+          
+            # if the rule failed, but there is a non-empty memoized AST for this rule or one of it's parents
+            # then retry the rule
+            if index == events.size &&                        # the rule failed
+               memo[position] && !memo[position].empty?
+               # call_stack_ancestor_has_memoized_result(call_stack_index)
+              # i = call_stack_ancestor_has_memoized_result(call_stack_index)
+              # memo_rule, memo_pos = call_stack[i]
+              # events.concat(cache[memo_rule][memo_pos])
+              # self.pos = events[-1]
 
+              events.concat(memo[position])
+              self.pos = events[-1]
+            end
+            
             if memoization_enabled
               puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{events.slice(index, events.size)} at position #{position}"
               # Memoize the result so we can use it next time this same rule is
@@ -497,6 +527,17 @@ module Citrus
       call_stack_pop
 
       events
+    end
+    
+    # returns the index into call_stack at which a rule/position pair exists that references a rule
+    #   with a memoized result.
+    # returns nil if no such index is found.
+    def call_stack_ancestor_has_memoized_result(call_stack_index)
+      (0..call_stack_index).to_a.reverse.detect do |i|
+        rule, pos = call_stack[i]
+        seed = cache[rule][pos]
+        seed && !seed.empty?          # there is a non-empty memoized AST
+      end
     end
     
     def call_stack_includes?(rule, position)
@@ -955,21 +996,20 @@ module Citrus
     end
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
+    def exec(input)
       puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       
-      index = events.size
+      parse_tree = input.exec(rule)
 
-      if input.exec(rule, events).size > index
+      if parse_tree.size > 0
         puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
-        # Proxy objects insert themselves into the event stream in place of the
-        # rule they are proxy for.
-        events[index] = self
+        # Proxy objects insert themselves into the event stream in place of the rule they are proxy for.
+        parse_tree[0] = self
       else
         puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
-      events
+      parse_tree
     end
 
     # Returns +true+ if this rule should extend a match but should not appear in
@@ -1072,20 +1112,22 @@ module Citrus
     attr_reader :regexp
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
+    def exec(input)
       puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       match = input.scan(@regexp)
 
+      parse_tree = []
+
       if match
         puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
-        events << self
-        events << CLOSE
-        events << match.length
+        parse_tree << self
+        parse_tree << CLOSE
+        parse_tree << match.length
       else
         puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
-      events
+      parse_tree
     end
 
     # Returns +true+ if this rule is case sensitive.
@@ -1198,14 +1240,16 @@ module Citrus
     end
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
-      if input.test(rule)
-        events << self
-        events << CLOSE
-        events << 0
+    def exec(input)
+      parse_tree = []
+      
+      if input.test(rule) > 0
+        parse_tree << self
+        parse_tree << CLOSE
+        parse_tree << 0
       end
 
-      events
+      parse_tree
     end
 
     # Returns the Citrus notation of this rule as a string.
@@ -1233,14 +1277,16 @@ module Citrus
     end
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
-      unless input.test(rule)
-        events << self
-        events << CLOSE
-        events << 0
+    def exec(input)
+      parse_tree = []
+      
+      unless input.test(rule) > 0
+        parse_tree << self
+        parse_tree << CLOSE
+        parse_tree << 0
       end
-
-      events
+      
+      parse_tree
     end
 
     # Returns the Citrus notation of this rule as a string.
@@ -1270,22 +1316,24 @@ module Citrus
     end
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
+    def exec(input)
+      parse_tree = []
+      
       length = 0
 
-      until input.test(rule)
+      until input.test(rule) > 0
         len = input.exec(DOT_RULE)[-1]
-        break unless len
+        break if len.nil?
         length += len
       end
 
       if length > 0
-        events << self
-        events << CLOSE
-        events << length
+        parse_tree << self
+        parse_tree << CLOSE
+        parse_tree << length
       end
 
-      events
+      parse_tree
     end
 
     # Returns the Citrus notation of this rule as a string.
@@ -1329,24 +1377,24 @@ module Citrus
     end
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
-      events << self
-
-      index = events.size
-      start = index - 1
+    def exec(input)
+      events = []
+      
+      partial_parse_tree = []
+      
       length = n = 0
 
-      while n < max && input.exec(rule, events).size > index
-        length += events[-1]
-        index = events.size
+      while n < max && (parse_tree = input.exec(rule)).size > 0
+        length += parse_tree[-1]
+        partial_parse_tree.concat(parse_tree)
         n += 1
       end
 
       if n >= min
+        events << self
+        events.concat(partial_parse_tree)
         events << CLOSE
         events << length
-      else
-        events.slice!(start, index)
       end
 
       events
@@ -1385,30 +1433,31 @@ module Citrus
     include Nonterminal
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
+    def exec(input)
+      events = []
+      
       puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
-      events << self
 
-      index = events.size
-      start = index - 1
+      partial_parse_tree = []
       length = n = 0
       m = rules.length
 
-      while n < m && input.exec(rules[n], events).size > index
-        length += events[-1]
-        index = events.size
+      while n < m && (parse_tree = input.exec(rules[n])).size > 0
+        length += parse_tree[-1]
+        partial_parse_tree.concat(parse_tree)
         n += 1
       end
 
       if n == m
+        events << self
         puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
+        events.concat(partial_parse_tree)
         events << CLOSE
         events << length
       else
         puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
         puts "n = #{n}"
         puts "m = #{m}"
-        events.slice!(start, index)
       end
 
       events
@@ -1429,25 +1478,27 @@ module Citrus
     include Nonterminal
 
     # Returns an array of events for this rule on the given +input+.
-    def exec(input, events=[])
+    def exec(input)
+      events=[]
       puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
-      events << self
 
-      index = events.size
       n = 0
       m = rules.length
 
-      while n < m && input.exec(rules[n], events).size == index
+      parse_tree = []
+
+      while n < m && (parse_tree = input.exec(rules[n])).size == 0
         n += 1
       end
 
-      if index < events.size
+      if parse_tree.size > 0
         puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
+        events << self
+        events.concat(parse_tree)
         events << CLOSE
-        events << events[-2]
+        events << parse_tree[-1]
       else
         puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
-        events.pop
       end
 
       events
