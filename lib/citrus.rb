@@ -345,6 +345,7 @@ module Citrus
       @call_stack = []
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
       @longest_match = {}
+      @limit = Set.new
     end
     
     # call_stack is a stack [<R, P>, ...] that stores a list of (rule, position) pairs
@@ -359,12 +360,15 @@ module Citrus
     attr_reader :memoization_enabled
     
     attr_reader :longest_match
+    
+    attr_reader :limit
 
     def reset # :nodoc:
       @memoization_enabled = true
       @call_stack.clear
       @call_stack_indices.clear
       @longest_match.clear
+      @limit.clear
       super
     end
     
@@ -400,12 +404,34 @@ module Citrus
       # puts position
       # puts events.inspect
 
+      this_is_a_recursive_call = call_stack_rules.include?(rule)
       this_is_a_left_recursive_call = call_stack_includes?(rule, position)
+      # this_is_a_non_left_recursive_recursive_call means: this is a recursive call, but it isn't a left-recursive call
+      this_is_a_non_left_recursive_recursive_call = this_is_a_recursive_call && !this_is_a_left_recursive_call
 
       call_stack_push(rule, position)
       call_stack_index = call_stack.size - 1
 
-      if memo[position]
+      # This is Algorithm 2 from 
+      # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
+      case
+      when this_is_a_non_left_recursive_recursive_call  # && rule.definitely_right_recursive?
+        # if we're calling a definitely right-recursive call R, and we're already in right-recursion on R, we fail in
+        # order to ensure that right-recursion never goes more than one level deep.
+        
+        # if we're in a recursive-non-left-recursive call and told to limit on R, then we fail
+        if limit.include?(rule)
+          events = []
+        elsif is_rule_in_left_recursion?(rule)   # If we're not in right-recursion on a rule, but are in left-recursion via a prior call 
+          limit.add(rule)
+          events = normally_apply_rule(rule, position, memo)
+          limit.delete(rule)
+        else
+          events = normally_apply_rule(rule, position, memo)
+        end
+        
+      # this rule application has been memoized, so return the memoized parse tree
+      when memo[position]
         # puts "count = #{count}"
         puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
         @cache_hits += 1
@@ -414,129 +440,141 @@ module Citrus
           events = parse_tree
           self.pos += parse_tree[-1]
         end
-      else
-        # This is Algorithm 1 from 
-        # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
-        case
-          # left-recursion has not yet occurred but is about to begin - this is triggered when
-          #   no input has been consumed, detected when P has not advanced over orig_pos
-          # when rule == orig_rule && position = orig_pos
-          when this_is_a_left_recursive_call
-            # Set up the base case (the non-recursive case):
-            # initialize the seed value to nil so that if / when left-recursion happens for 
-            #   this rule at this input position, the initial left-recursion will fail.
-            # store an empty parse tree - Tratt uses 'null' to represent an empty tree
-            memo[position] = []   # if memoization_enabled
-            puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"  if memoization_enabled
+        
+      # left-recursion has not yet occurred but is about to begin - this is triggered when
+      #   no input has been consumed, detected when P has not advanced over orig_pos
+      # when rule == orig_rule && position = orig_pos
+      when this_is_a_left_recursive_call
+        
+        # if we're in a left-recursive call and told to limit on R, then we fail
+        if limit.include?(rule)
+          events = []
+        else
+          # Set up the base case (the non-recursive case):
+          # initialize the seed value to nil so that if / when left-recursion happens for 
+          #   this rule at this input position, the initial left-recursion will fail.
+          # store an empty parse tree - Tratt uses 'null' to represent an empty tree
+          memo[position] = []   # if memoization_enabled
+          puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"  if memoization_enabled
 
-            # disable_memoization
-            
-            # we are now switching parsing modes, changing from top-down mode to Warth-style
-            #   iterative bottom-up mode.
-            # From Tratt's paper:
-            #   In essence, we continually re-evaluate the rule 'rule' at input position 'position' 
-            #   (note that 'position' does not advance); each time this re-evaluation is successful,
-            #   we update the seed in memo[position]. As expected, this means that each 
-            #   update of the seed includes within it the previous seed.
-            while true
-              puts 'lr rule application'
+          # disable_memoization
+        
+          # we are now switching parsing modes, changing from top-down mode to Warth-style
+          #   iterative bottom-up mode.
+          # From Tratt's paper:
+          #   In essence, we continually re-evaluate the rule 'rule' at input position 'position' 
+          #   (note that 'position' does not advance); each time this re-evaluation is successful,
+          #   we update the seed in memo[position]. As expected, this means that each 
+          #   update of the seed includes within it the previous seed.
+          while true
+            puts 'lr rule application'
 
-              # invoke the same rule another recursive time (the current invocation is the first recursive time)
-              # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
-              parse_tree = rule.exec(self)
-
-              seed = memo[position]
-              
-              # if the invocation of the parent rule was a recursive invocation, then memoization has been turned
-              # off, so the seed will be nil for this child rule's invocation, but the child rule is also treated as
-              # a recursive invocation because it appears at least once before in the call stack. We want to turn
-              # off position backtracking (lines 471 and 472) for all rules except the one original recursive call.
-              # break if seed.nil?
-
-              # This explains the following 'if' statement:
-              # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
-              # re-evaluation fails completely; OR if the result returned by re-evaluation consumes less
-              # of the input than the current seed (if one exists). The former case is trivial (though
-              # note that, by definition, it can only trigger on the first attempt at left-recursion). The
-              # latter is less obvious, and is not explained in depth by Warth et al. Intuitively, if a left-
-              # recursive call returns a 'shorter' result than the previous known one, then by definition
-              # it has not used the current seed; in other words, the left-recursion must have exhausted
-              # itself.
-              puts "result = #{parse_tree.inspect}"
-              puts "seed = cache[#{rule} - ##{rule.object_id}][#{position}] = #{seed.inspect}"
-              if parse_tree.empty? ||                       # case 1: evaluation has failed completely
-                 seed[-1] && parse_tree[-1] <= seed[-1]     # case 2: result consumes less or equal input as the current seed
-                 
-                # enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
-                memo.delete(position)
-                
-                puts 'RETURNING'
-                puts "events = #{parse_tree.inspect}"
-                puts "position = #{position}"
-                puts "pos = #{self.pos}"
-                
-                unless seed.empty?
-                  events = seed
-                  self.pos = position + events[-1]
-                end
-                puts "pos = #{self.pos}"
-
-                break
-              end
-
-              memo[position] = parse_tree
-              longest_match[rule][position] = parse_tree
-              
-              # backtrack and run the same rule again
-              self.pos = position                   # we must backtrack to the original position, 'position'
-            end
-
-          # left-recursion is not occuring - rule is not calling itself left-recursively
-          # do do everything normally - traditional PEG rule application
-          else
-            puts 'normal rule application'
-            
+            # invoke the same rule another recursive time (the current invocation is the first recursive time)
+            # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
             parse_tree = rule.exec(self)
-            
-            if parse_tree.empty?    # parse failed - but we may have a partial parse tree in the match-stack
-              # if evaluation fails completely (i.e. the seed is an empty parse tree), then
-              # return the second-to-last successful match (i.e. the match that occurred prior to the longest match).
-              # We return the second-to-last match since we'll be returning to the initial invocation
-              # of this rule, and *it* can then successfully match on the longest match, and succeed.
-              if longest_match[rule][position]
-                parse_tree = longest_match[rule][position]
-                self.pos = position + parse_tree[-1]
-              end
-            end
-            
-            events = parse_tree
+
+            seed = memo[position]
           
-            # if the rule failed, but there is a non-empty memoized AST for this rule
-            # then retry the rule
-            # if parse_tree.size == 0 &&                        # the rule failed
-            #    memo[position] && !memo[position].empty?
-            #    # call_stack_ancestor_has_memoized_result(call_stack_index)
-            #   # i = call_stack_ancestor_has_memoized_result(call_stack_index)
-            #   # memo_rule, memo_pos = call_stack[i]
-            #   # events.concat(cache[memo_rule][memo_pos])
-            #   # self.pos = events[-1]
-            # 
-            #   events = parse_tree = memo[position]
-            #   self.pos = position + parse_tree[-1]
-            # end
+            # if the invocation of the parent rule was a recursive invocation, then memoization has been turned
+            # off, so the seed will be nil for this child rule's invocation, but the child rule is also treated as
+            # a recursive invocation because it appears at least once before in the call stack. We want to turn
+            # off position backtracking (lines 471 and 472) for all rules except the one original recursive call.
+            # break if seed.nil?
+
+            # This explains the following 'if' statement:
+            # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
+            # re-evaluation fails completely; OR if the result returned by re-evaluation consumes less
+            # of the input than the current seed (if one exists). The former case is trivial (though
+            # note that, by definition, it can only trigger on the first attempt at left-recursion). The
+            # latter is less obvious, and is not explained in depth by Warth et al. Intuitively, if a left-
+            # recursive call returns a 'shorter' result than the previous known one, then by definition
+            # it has not used the current seed; in other words, the left-recursion must have exhausted
+            # itself.
+            puts "result = #{parse_tree.inspect}"
+            puts "seed = cache[#{rule} - ##{rule.object_id}][#{position}] = #{seed.inspect}"
+            if parse_tree.empty? ||                       # case 1: evaluation has failed completely
+               (seed[-1] && parse_tree[-1] <= seed[-1])   # case 2: result consumes less or equal input as the current seed
+             
+              # enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
+              memo.delete(position)
             
-            # if memoization_enabled
-              puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
-              # Memoize the result so we can use it next time this same rule is
-              # executed at this position.
-              memo[position] = parse_tree
-            # end
+              puts 'RETURNING'
+              puts "events = #{parse_tree.inspect}"
+              puts "position = #{position}"
+              puts "pos = #{self.pos}"
+            
+              unless seed.empty?
+                events = seed
+                self.pos = position + events[-1]
+              end
+              puts "pos = #{self.pos}"
+
+              break
+            end
+
+            memo[position] = parse_tree
+            longest_match[rule][position] = parse_tree
+          
+            # backtrack and run the same rule again
+            self.pos = position                   # we must backtrack to the original position, 'position'
+          end
+        end  # end if limit.include?(rule)
+
+      # this rule application is not a recursive call
+      # do do everything normally - traditional PEG rule application
+      else
+        if limit.include?(rule)
+          limit.delete(rule)
+          events = normally_apply_rule(rule, position, memo)
+          limit.add(rule)
+        else
+          events = normally_apply_rule(rule, position, memo)
         end
       end
       
       call_stack_pop
 
       events
+    end
+    
+    def normally_apply_rule(rule, position, memo)
+      puts 'normal rule application'
+
+      parse_tree = rule.exec(self)
+      
+      if parse_tree.empty?    # parse failed - but we may have a partial parse tree in the match-stack
+        # if evaluation fails completely (i.e. the seed is an empty parse tree), then
+        # return the second-to-last successful match (i.e. the match that occurred prior to the longest match).
+        # We return the second-to-last match since we'll be returning to the initial invocation
+        # of this rule, and *it* can then successfully match on the longest match, and succeed.
+        if longest_match[rule][position]
+          parse_tree = longest_match[rule][position]
+          self.pos = position + parse_tree[-1]
+        end
+      end
+      
+      # if the rule failed, but there is a non-empty memoized AST for this rule
+      # then retry the rule
+      # if parse_tree.size == 0 &&                        # the rule failed
+      #    memo[position] && !memo[position].empty?
+      #    # call_stack_ancestor_has_memoized_result(call_stack_index)
+      #   # i = call_stack_ancestor_has_memoized_result(call_stack_index)
+      #   # memo_rule, memo_pos = call_stack[i]
+      #   # events.concat(cache[memo_rule][memo_pos])
+      #   # self.pos = events[-1]
+      # 
+      #   events = parse_tree = memo[position]
+      #   self.pos = position + parse_tree[-1]
+      # end
+      
+      # if memoization_enabled
+        puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
+        # Memoize the result so we can use it next time this same rule is
+        # executed at this position.
+        memo[position] = parse_tree
+      # end
+      
+      parse_tree
     end
     
     # returns the index into call_stack at which a rule/position pair exists that references a rule
@@ -552,6 +590,25 @@ module Citrus
     
     def call_stack_includes?(rule, position)
       !call_stack_indices[ [rule, position] ].empty?
+    end
+    
+    def call_stack_rules
+      call_stack.map{|rule_position_pair| rule_position_pair.first }
+    end
+    
+    # This method indicates whether or not a particular rule is being left-recursively applied.
+    # If the given rule is currently being applied/invoked at the same position two or more times, then it is 
+    #   is in left recursion. In other words, if the rule, at any position, P, (i.e. the pair [rule, P], for any P)
+    #   exists in the call stack two or more times, then the rule is said to be in left-recursion.
+    def is_rule_in_left_recursion?(rule)
+      # 1. select only the subset of [rule_position_pair, index_list] pairs that 
+      #    reference the given rule in the rule_position_pair key
+      subset = call_stack_indices.select {|rule_position_pair, v| rule_position_pair.first == rule }
+      
+      # 2. from the subset, determine whether any of the index_list values have a length greater than 1.
+      #    A index_list with a length greater than 1 indicates that the given rule is currently being applied
+      #    at the same position two or more times, which indicates that it is in left-recursion.
+      subset.any? {|rule_position_pair, v| v.size >= 2 }
     end
 
     def call_stack_push(rule, position)
