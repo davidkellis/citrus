@@ -341,7 +341,6 @@ module Citrus
     def initialize(string)
       super(string)
       @count = 0
-      @memoization_enabled = true
       @call_stack = []
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
       @longest_match = {}
@@ -357,14 +356,11 @@ module Citrus
     # pair occurs in the call_stack
     attr_reader :call_stack_indices
     
-    attr_reader :memoization_enabled
-    
     attr_reader :longest_match
     
     attr_reader :limit
 
     def reset # :nodoc:
-      @memoization_enabled = true
       @call_stack.clear
       @call_stack_indices.clear
       @longest_match.clear
@@ -376,14 +372,6 @@ module Citrus
 
     def this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
       call_stack_indices[ [rule, position] ].size == 1
-    end
-
-    def enable_memoization
-      @memoization_enabled = true
-    end
-
-    def disable_memoization
-      @memoization_enabled = false
     end
 
     def apply_rule(rule, position) # :nodoc:
@@ -454,11 +442,9 @@ module Citrus
           # initialize the seed value to nil so that if / when left-recursion happens for 
           #   this rule at this input position, the initial left-recursion will fail.
           # store an empty parse tree - Tratt uses 'null' to represent an empty tree
-          memo[position] = []   # if memoization_enabled
-          puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"  if memoization_enabled
+          memo[position] = []
+          puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"
 
-          # disable_memoization
-        
           # we are now switching parsing modes, changing from top-down mode to Warth-style
           #   iterative bottom-up mode.
           # From Tratt's paper:
@@ -495,7 +481,6 @@ module Citrus
             if parse_tree.empty? ||                       # case 1: evaluation has failed completely
                (seed[-1] && parse_tree[-1] <= seed[-1])   # case 2: result consumes less or equal input as the current seed
              
-              # enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
               memo.delete(position)
             
               puts 'RETURNING'
@@ -567,12 +552,10 @@ module Citrus
       #   self.pos = position + parse_tree[-1]
       # end
       
-      # if memoization_enabled
-        puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
-        # Memoize the result so we can use it next time this same rule is
-        # executed at this position.
-        memo[position] = parse_tree
-      # end
+      puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
+      # Memoize the result so we can use it next time this same rule is
+      # executed at this position.
+      memo[position] = parse_tree
       
       parse_tree
     end
