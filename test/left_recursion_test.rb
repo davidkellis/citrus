@@ -1,40 +1,44 @@
 require File.expand_path('../helper', __FILE__)
 
 class LeftRecursionTest < Test::Unit::TestCase
-  def test_exec
+  def test_lr1
     grammar = Grammar.new {
       rule(:a) { 'a' }
       rule(:b) { 'b' }
       rule(:s) { any([:s, :b], :a) }
     }
     
-    match = grammar.parse("abb", :consume => true, :left_recurse => true, :root => :s)
+    match = grammar.parse("abbbbbb", :consume => true, :left_recurse => true, :root => :s)
     assert(match)
+  end
+  
+  def test_lr2
+    grammar = Grammar.new {
+      rule(:a) { 'a' }
+      rule(:b) { 'b' }
+      rule(:s) { any(:t, :a) }
+      rule(:t) { all(:s, :b) }
+    }
     
-    # input = LeftRecursiveMemoizedInput.new()
-    # events = input.exec(s)
+    match = grammar.parse("abbbbbbbbbbbbb", :consume => true, :left_recurse => true, :root => :s)
+    assert(match)
+  end
 
-    # expected_events = [
-    #   s,
-    #     s,
-    #       s,
-    #         s,
-    #           z, CLOSE, 1,
-    #         CLOSE, 1,
-    #         a, CLOSE, 1,
-    #         b, CLOSE, 1,
-    #         c, CLOSE, 1,
-    #       CLOSE, 4,
-    #       a, CLOSE, 1,
-    #       b, CLOSE, 1,
-    #       c, CLOSE, 1,
-    #     CLOSE, 7,
-    #     a, CLOSE, 1,
-    #     b, CLOSE, 1,
-    #     c, CLOSE, 1,
-    #   CLOSE, 10
-    # ]
-
-    # assert_equal(expected_events, events)
+  def test_lr3
+    grammar = Grammar.new do
+      rule :expr do
+        any(all(label(:expr, 'lhs'), '-', label(:expr, 'rhs')){lhs.value - rhs.value},
+            :num)
+      end
+  
+      rule :num do
+        ext(/[0-9]+/){to_i}
+      end
+    end
+  
+    match = grammar.parse("3-4-5", {:consume => true, :left_recurse => true})
+    assert(match)
+    assert_equal("3-4-5", match)
+    assert_equal(-6, match.value)
   end
 end

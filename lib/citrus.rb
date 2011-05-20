@@ -344,6 +344,7 @@ module Citrus
       @memoization_enabled = true
       @call_stack = []
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
+      @longest_match = {}
     end
     
     # call_stack is a stack [<R, P>, ...] that stores a list of (rule, position) pairs
@@ -356,18 +357,16 @@ module Citrus
     attr_reader :call_stack_indices
     
     attr_reader :memoization_enabled
+    
+    attr_reader :longest_match
 
     def reset # :nodoc:
       @memoization_enabled = true
       @call_stack.clear
       @call_stack_indices.clear
+      @longest_match.clear
       super
     end
-    
-    # def exec(rule, events=[])
-    #   events.push([rule, pos]) if events.empty?
-    #   super
-    # end
     
   private
 
@@ -383,10 +382,13 @@ module Citrus
       @memoization_enabled = false
     end
 
-    def apply_rule(rule, position, events) # :nodoc:
+    def apply_rule(rule, position) # :nodoc:
+      events = []
+      
       @count += 1
       count = @count
       
+      longest_match[rule] ||= {}
       memo = @cache[rule] ||= {}
 
       puts "apply_rule(#{rule} - ##{rule.object_id}, #{position}, #{events})"
@@ -407,10 +409,10 @@ module Citrus
         # puts "count = #{count}"
         puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
         @cache_hits += 1
-        c = memo[position]
-        unless c.empty?
-          events.concat(c)
-          self.pos += events[-1]
+        parse_tree = memo[position]
+        unless parse_tree.empty?
+          events = parse_tree
+          self.pos += parse_tree[-1]
         end
       else
         # This is Algorithm 1 from 
@@ -424,10 +426,10 @@ module Citrus
             # initialize the seed value to nil so that if / when left-recursion happens for 
             #   this rule at this input position, the initial left-recursion will fail.
             # store an empty parse tree - Tratt uses 'null' to represent an empty tree
-            memo[position] = [] if memoization_enabled
+            memo[position] = []   # if memoization_enabled
             puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"  if memoization_enabled
 
-            disable_memoization
+            # disable_memoization
             
             # we are now switching parsing modes, changing from top-down mode to Warth-style
             #   iterative bottom-up mode.
@@ -441,9 +443,7 @@ module Citrus
 
               # invoke the same rule another recursive time (the current invocation is the first recursive time)
               # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
-              index = events.size
-              rule.exec(self, events)
-              result = events.slice(index, events.size)
+              parse_tree = rule.exec(self)
 
               seed = memo[position]
               
@@ -451,7 +451,7 @@ module Citrus
               # off, so the seed will be nil for this child rule's invocation, but the child rule is also treated as
               # a recursive invocation because it appears at least once before in the call stack. We want to turn
               # off position backtracking (lines 471 and 472) for all rules except the one original recursive call.
-              break if seed.nil?
+              # break if seed.nil?
 
               # This explains the following 'if' statement:
               # Re-evaluation of 'rule' at input position 'position' can be unsuccessful for two reasons: if the
@@ -462,35 +462,33 @@ module Citrus
               # recursive call returns a 'shorter' result than the previous known one, then by definition
               # it has not used the current seed; in other words, the left-recursion must have exhausted
               # itself.
-              puts "result = #{result.inspect}"
+              puts "result = #{parse_tree.inspect}"
               puts "seed = cache[#{rule} - ##{rule.object_id}][#{position}] = #{seed.inspect}"
-              if result.empty? ||                   # case 1: evaluation has failed completely
-                 result[-1] < (seed[-1] || 0)       # case 2: result consumes less input than the current seed
+              if parse_tree.empty? ||                       # case 1: evaluation has failed completely
+                 seed[-1] && parse_tree[-1] <= seed[-1]     # case 2: result consumes less or equal input as the current seed
                  
-                enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
+                # enable_memoization if this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
+                memo.delete(position)
                 
                 puts 'RETURNING'
-                puts "events = #{events.inspect}"
-                events.slice!(index, events.size)     # remove whatever result was appended to events
-                puts "events = #{events.inspect}"
+                puts "events = #{parse_tree.inspect}"
                 puts "position = #{position}"
                 puts "pos = #{self.pos}"
+                
                 unless seed.empty?
-                  events.concat(seed)
-                  self.pos = seed[-1]
+                  events = seed
+                  self.pos = position + events[-1]
                 end
-                puts "events = #{events.inspect}"
-                puts "position = #{position}"
                 puts "pos = #{self.pos}"
 
                 break
               end
 
-              memo[position] = result
+              memo[position] = parse_tree
+              longest_match[rule][position] = parse_tree
               
               # backtrack and run the same rule again
               self.pos = position                   # we must backtrack to the original position, 'position'
-              events.slice!(index, events.size)     # remove whatever result was appended to events
             end
 
           # left-recursion is not occuring - rule is not calling itself left-recursively
@@ -498,29 +496,41 @@ module Citrus
           else
             puts 'normal rule application'
             
-            index = events.size
-            rule.exec(self, events)
-          
-            # if the rule failed, but there is a non-empty memoized AST for this rule or one of it's parents
-            # then retry the rule
-            if index == events.size &&                        # the rule failed
-               memo[position] && !memo[position].empty?
-               # call_stack_ancestor_has_memoized_result(call_stack_index)
-              # i = call_stack_ancestor_has_memoized_result(call_stack_index)
-              # memo_rule, memo_pos = call_stack[i]
-              # events.concat(cache[memo_rule][memo_pos])
-              # self.pos = events[-1]
-
-              events.concat(memo[position])
-              self.pos = events[-1]
+            parse_tree = rule.exec(self)
+            
+            if parse_tree.empty?    # parse failed - but we may have a partial parse tree in the match-stack
+              # if evaluation fails completely (i.e. the seed is an empty parse tree), then
+              # return the second-to-last successful match (i.e. the match that occurred prior to the longest match).
+              # We return the second-to-last match since we'll be returning to the initial invocation
+              # of this rule, and *it* can then successfully match on the longest match, and succeed.
+              if longest_match[rule][position]
+                parse_tree = longest_match[rule][position]
+                self.pos = position + parse_tree[-1]
+              end
             end
             
-            if memoization_enabled
-              puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{events.slice(index, events.size)} at position #{position}"
+            events = parse_tree
+          
+            # if the rule failed, but there is a non-empty memoized AST for this rule
+            # then retry the rule
+            # if parse_tree.size == 0 &&                        # the rule failed
+            #    memo[position] && !memo[position].empty?
+            #    # call_stack_ancestor_has_memoized_result(call_stack_index)
+            #   # i = call_stack_ancestor_has_memoized_result(call_stack_index)
+            #   # memo_rule, memo_pos = call_stack[i]
+            #   # events.concat(cache[memo_rule][memo_pos])
+            #   # self.pos = events[-1]
+            # 
+            #   events = parse_tree = memo[position]
+            #   self.pos = position + parse_tree[-1]
+            # end
+            
+            # if memoization_enabled
+              puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
               # Memoize the result so we can use it next time this same rule is
               # executed at this position.
-              memo[position] = events.slice(index, events.size)
-            end
+              memo[position] = parse_tree
+            # end
         end
       end
       
