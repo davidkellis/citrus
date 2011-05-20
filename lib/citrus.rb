@@ -1019,6 +1019,10 @@ module Citrus
     def extend_match(match) # :nodoc:
       match.extend(extension) if extension
     end
+    
+    def hash
+      to_s.hash
+    end
   end
 
   # A Proxy is a Rule that is a placeholder for another rule. It stores the
