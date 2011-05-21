@@ -345,6 +345,7 @@ module Citrus
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
       @longest_match = {}
       @limit = Set.new
+      @memo_log = []
     end
     
     # call_stack is a stack [<R, P>, ...] that stores a list of (rule, position) pairs
@@ -359,20 +360,23 @@ module Citrus
     attr_reader :longest_match
     
     attr_reader :limit
+    
+    attr_reader :memo_log
 
     def reset # :nodoc:
       @call_stack.clear
       @call_stack_indices.clear
       @longest_match.clear
       @limit.clear
+      @memo_log.clear
       super
     end
     
   private
 
-    def this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
-      call_stack_indices[ [rule, position] ].size == 1
-    end
+    # def this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
+    #   call_stack_indices[ [rule, position] ].size == 1
+    # end
 
     def apply_rule(rule, position) # :nodoc:
       events = []
@@ -454,6 +458,8 @@ module Citrus
           #   update of the seed includes within it the previous seed.
           while true
             puts 'lr rule application'
+
+            # removed_logged_memoizations_occurring_after()
 
             # invoke the same rule another recursive time (the current invocation is the first recursive time)
             # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
@@ -552,10 +558,19 @@ module Citrus
       #   self.pos = position + parse_tree[-1]
       # end
       
-      puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
-      # Memoize the result so we can use it next time this same rule is
-      # executed at this position.
-      memo[position] = parse_tree
+      # only memoize a result if there is no ongoing left-recursion, in any rule
+      if !any_rule_in_left_recursion?
+        puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
+        # Memoize the result so we can use it next time this same rule is
+        # executed at this position.
+        memo[position] = parse_tree
+        # memo_log << [rule, rule_invocation_id]
+      end
+      
+      if !parse_tree.empty? && 
+         (longest_match[rule][position].nil? || parse_tree[-1] > longest_match[rule][position][-1])
+        longest_match[rule][position] = parse_tree
+      end
       
       parse_tree
     end
@@ -563,16 +578,16 @@ module Citrus
     # returns the index into call_stack at which a rule/position pair exists that references a rule
     #   with a memoized result.
     # returns nil if no such index is found.
-    def call_stack_ancestor_has_memoized_result(call_stack_index)
-      (0..call_stack_index).to_a.reverse.detect do |i|
-        rule, pos = call_stack[i]
-        seed = cache[rule][pos]
-        seed && !seed.empty?          # there is a non-empty memoized AST
-      end
-    end
+    # def call_stack_ancestor_has_memoized_result(call_stack_index)
+    #   (0..call_stack_index).to_a.reverse.detect do |i|
+    #     rule, pos = call_stack[i]
+    #     seed = cache[rule][pos]
+    #     seed && !seed.empty?          # there is a non-empty memoized AST
+    #   end
+    # end
     
     def call_stack_includes?(rule, position)
-      !call_stack_indices[ [rule, position] ].empty?
+      !call_stack_indices[ [rule.hash, position] ].empty?
     end
     
     def call_stack_rules
@@ -586,16 +601,22 @@ module Citrus
     def is_rule_in_left_recursion?(rule)
       # 1. select only the subset of [rule_position_pair, index_list] pairs that 
       #    reference the given rule in the rule_position_pair key
-      subset = call_stack_indices.select {|rule_position_pair, v| rule_position_pair.first == rule }
+      subset = call_stack_indices.select {|rule_position_pair, v| rule_position_pair.first == rule.hash }
       
       # 2. from the subset, determine whether any of the index_list values have a length greater than 1.
       #    A index_list with a length greater than 1 indicates that the given rule is currently being applied
       #    at the same position two or more times, which indicates that it is in left-recursion.
       subset.any? {|rule_position_pair, v| v.size >= 2 }
     end
+    
+    # this method returns true if any rule in the call stack is currently in the midst of a left-recursion application.
+    # in other words, if any left-recursion is currently ongoing, then return true.
+    def any_rule_in_left_recursion?
+      call_stack_indices.any? {|rule_position_pair, v| v.size >= 2 }
+    end
 
     def call_stack_push(rule, position)
-      rule_pos_pair = [rule, position]
+      rule_pos_pair = [rule.hash, position]
       
       # push the given rule and position onto the call stack
       call_stack.push rule_pos_pair
