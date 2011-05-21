@@ -388,18 +388,18 @@ module Citrus
       call_stack_push(rule, position)
       call_stack_index = call_stack.size - 1
 
-      # This is Algorithm 2 from 
+      # This is based off of Algorithm 2 from 
       # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
       case
-      # # this rule application has been memoized, so return the memoized parse tree
-      # when memo[position]
-      #   puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
-      #   @cache_hits += 1
-      #   parse_tree = memo[position]
-      #   unless parse_tree.empty?
-      #     events = parse_tree
-      #     self.pos += parse_tree[-1]
-      #   end
+      # we're not in any left-recursion and this rule application has been memoized, so return the memoized parse tree
+      when !any_rule_in_left_recursion? && memo[position]
+        puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
+        @cache_hits += 1
+        parse_tree = memo[position]
+        unless parse_tree.empty?
+          events = parse_tree
+          self.pos += parse_tree[-1]
+        end
 
       when this_is_a_non_left_recursive_recursive_call  # && rule.definitely_right_recursive?
         puts 'nlr rule application'
@@ -547,17 +547,6 @@ module Citrus
       
       parse_tree
     end
-    
-    # returns the index into call_stack at which a rule/position pair exists that references a rule
-    #   with a memoized result.
-    # returns nil if no such index is found.
-    # def call_stack_ancestor_has_memoized_result(call_stack_index)
-    #   (0..call_stack_index).to_a.reverse.detect do |i|
-    #     rule, pos = call_stack[i]
-    #     seed = cache[rule][pos]
-    #     seed && !seed.empty?          # there is a non-empty memoized AST
-    #   end
-    # end
     
     def call_stack_includes?(rule, position)
       !call_stack_indices[ [rule.hash, position] ].empty?
