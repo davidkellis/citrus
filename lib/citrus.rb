@@ -378,8 +378,6 @@ module Citrus
       seeds[rule] ||= {}
       memo = @cache[rule] ||= {}
 
-      puts "apply_rule(#{rule} - ##{rule.object_id}, #{position}, #{events})"
-
       this_is_a_recursive_call = call_stack_rule_hashes.include?(rule.hash)
       this_is_a_left_recursive_call = call_stack_includes?(rule, position)
       # this_is_a_non_left_recursive_recursive_call means: this is a recursive call, but it isn't a left-recursive call
@@ -393,7 +391,6 @@ module Citrus
       case
       # we're not in any left-recursion and this rule application has been memoized, so return the memoized parse tree
       when !any_rule_in_left_recursion? && memo[position]
-        puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
         @cache_hits += 1
         parse_tree = memo[position]
         unless parse_tree.empty?
@@ -402,7 +399,6 @@ module Citrus
         end
 
       when this_is_a_non_left_recursive_recursive_call  # && rule.definitely_right_recursive?
-        puts 'nlr rule application'
         # if we're calling a definitely right-recursive call R, and we're already in right-recursion on R, we fail in
         # order to ensure that right-recursion never goes more than one level deep.
         
@@ -420,8 +416,6 @@ module Citrus
       # if this is a recursive call and a seed value exists for 'rule' at 'position', then return that seed value
       # note: this will only occur if the rule is a left-recursive application
       when this_is_a_recursive_call && seeds[rule].include?(position)
-        puts "seed hit! seeds[#{rule}][#{position}] = #{seeds[rule][position]}"
-        
         parse_tree = seeds[rule][position]
         unless parse_tree.empty?
           events = parse_tree
@@ -442,7 +436,6 @@ module Citrus
           #   this rule at this input position, the initial left-recursion will fail.
           # store an empty parse tree - Tratt uses 'null' to represent an empty tree
           seeds[rule][position] = []
-          puts "null seeding ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"
 
           # we are now switching parsing modes, changing from top-down mode to Warth-style
           #   iterative bottom-up mode.
@@ -452,8 +445,6 @@ module Citrus
           #   we update the seed in memo[position]. As expected, this means that each 
           #   update of the seed includes within it the previous seed.
           while true
-            puts 'lr rule application'
-
             # invoke the same rule another recursive time (the current invocation is the first recursive time)
             # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
             parse_tree = rule.exec(self)
@@ -479,8 +470,6 @@ module Citrus
                (seed[-1] && parse_tree[-1] <= seed[-1])   # case 2: result consumes less input than (or equal input amount as) the current seed
              
               seeds[rule].delete(position)
-            
-              puts 'RETURNING'
             
               unless seed.empty?
                 events = seed
@@ -518,8 +507,6 @@ module Citrus
     end
     
     def normally_apply_rule(rule, position, memo)
-      puts 'normal rule application'
-
       parse_tree = rule.exec(self)
       
       # if evaluation fails completely (i.e. we have an empty parse tree), then return any memoized result.
@@ -914,12 +901,6 @@ module Citrus
       events = input.exec(self)
       length = events[-1]
 
-      puts '==='
-      puts events
-      puts '==='
-      puts length
-      puts (string.length - opts[:offset])
-      
       if !length || (opts[:consume] && length < (string.length - opts[:offset]))
         raise ParseError, input
       end
@@ -1034,16 +1015,11 @@ module Citrus
 
     # Returns an array of events for this rule on the given +input+.
     def exec(input)
-      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
-      
       parse_tree = input.exec(rule)
 
       if parse_tree.size > 0
-        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         # Proxy objects insert themselves into the event stream in place of the rule they are proxy for.
         parse_tree[0] = self
-      else
-        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
       parse_tree
@@ -1150,18 +1126,14 @@ module Citrus
 
     # Returns an array of events for this rule on the given +input+.
     def exec(input)
-      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       match = input.scan(@regexp)
 
       parse_tree = []
 
       if match
-        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         parse_tree << self
         parse_tree << CLOSE
         parse_tree << match.length
-      else
-        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
       parse_tree
@@ -1473,8 +1445,6 @@ module Citrus
     def exec(input)
       events = []
       
-      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
-
       partial_parse_tree = []
       length = n = 0
       m = rules.length
@@ -1487,12 +1457,9 @@ module Citrus
 
       if n == m
         events << self
-        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         events.concat(partial_parse_tree)
         events << CLOSE
         events << length
-      else
-        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
       events
@@ -1515,7 +1482,6 @@ module Citrus
     # Returns an array of events for this rule on the given +input+.
     def exec(input)
       events=[]
-      puts "Trying ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
 
       n = 0
       m = rules.length
@@ -1527,13 +1493,10 @@ module Citrus
       end
 
       if parse_tree.size > 0
-        puts "Matched ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} ; now at position #{input.pos}"
         events << self
         events.concat(parse_tree)
         events << CLOSE
         events << parse_tree[-1]
-      else
-        puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
       end
 
       events
