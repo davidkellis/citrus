@@ -343,9 +343,8 @@ module Citrus
       @count = 0
       @call_stack = []
       @call_stack_indices = Hash.new {|hash, key| hash[key] = Set.new }
-      @longest_match = {}
+      @seeds = {}
       @limit = Set.new
-      @memo_log = []
     end
     
     # call_stack is a stack [<R, P>, ...] that stores a list of (rule, position) pairs
@@ -357,26 +356,19 @@ module Citrus
     # pair occurs in the call_stack
     attr_reader :call_stack_indices
     
-    attr_reader :longest_match
+    attr_reader :seeds
     
     attr_reader :limit
     
-    attr_reader :memo_log
-
     def reset # :nodoc:
       @call_stack.clear
       @call_stack_indices.clear
-      @longest_match.clear
+      @seeds.clear
       @limit.clear
-      @memo_log.clear
       super
     end
     
   private
-
-    # def this_is_the_only_recursive_call_in_the_call_stack?(rule, position)
-    #   call_stack_indices[ [rule, position] ].size == 1
-    # end
 
     def apply_rule(rule, position) # :nodoc:
       events = []
@@ -384,19 +376,12 @@ module Citrus
       @count += 1
       count = @count
       
-      longest_match[rule] ||= {}
+      seeds[rule] ||= {}
       memo = @cache[rule] ||= {}
 
       puts "apply_rule(#{rule} - ##{rule.object_id}, #{position}, #{events})"
-      # puts '---'
-      # puts "count = #{count}"
-      # puts "name = #{rule.name}"
-      # puts rule.inspect
-      # puts rule.class
-      # puts position
-      # puts events.inspect
 
-      this_is_a_recursive_call = call_stack_rules.include?(rule)
+      this_is_a_recursive_call = call_stack_rule_hashes.include?(rule.hash)
       this_is_a_left_recursive_call = call_stack_includes?(rule, position)
       # this_is_a_non_left_recursive_recursive_call means: this is a recursive call, but it isn't a left-recursive call
       this_is_a_non_left_recursive_recursive_call = this_is_a_recursive_call && !this_is_a_left_recursive_call
@@ -407,7 +392,18 @@ module Citrus
       # This is Algorithm 2 from 
       # http://tratt.net/laurie/research/publications/papers/tratt__direct_left_recursive_parsing_expression_grammars.pdf
       case
+      # # this rule application has been memoized, so return the memoized parse tree
+      # when memo[position]
+      #   puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
+      #   @cache_hits += 1
+      #   parse_tree = memo[position]
+      #   unless parse_tree.empty?
+      #     events = parse_tree
+      #     self.pos += parse_tree[-1]
+      #   end
+
       when this_is_a_non_left_recursive_recursive_call  # && rule.definitely_right_recursive?
+        puts 'nlr rule application'
         # if we're calling a definitely right-recursive call R, and we're already in right-recursion on R, we fail in
         # order to ensure that right-recursion never goes more than one level deep.
         
@@ -421,18 +417,18 @@ module Citrus
         else
           events = normally_apply_rule(rule, position, memo)
         end
+      
+      # if this is a recursive call and a seed value exists for 'rule' at 'position', then return that seed value
+      # note: this will only occur if the rule is a left-recursive application
+      when this_is_a_recursive_call && seeds[rule].include?(position)
+        puts "seed hit! seeds[#{rule}][#{position}] = #{seeds[rule][position]}"
         
-      # this rule application has been memoized, so return the memoized parse tree
-      when memo[position]
-        # puts "count = #{count}"
-        puts "cache hit! cache[#{rule}][#{position}] = #{memo[position]}"
-        @cache_hits += 1
-        parse_tree = memo[position]
+        parse_tree = seeds[rule][position]
         unless parse_tree.empty?
           events = parse_tree
           self.pos += parse_tree[-1]
         end
-        
+      
       # left-recursion has not yet occurred but is about to begin - this is triggered when
       #   no input has been consumed, detected when P has not advanced over orig_pos
       # when rule == orig_rule && position = orig_pos
@@ -446,8 +442,8 @@ module Citrus
           # initialize the seed value to nil so that if / when left-recursion happens for 
           #   this rule at this input position, the initial left-recursion will fail.
           # store an empty parse tree - Tratt uses 'null' to represent an empty tree
-          memo[position] = []
-          puts "null memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"
+          seeds[rule][position] = []
+          puts "null seeding ##{rule.object_id} #{rule.name} - #{rule.inspect} at position #{position}"
 
           # we are now switching parsing modes, changing from top-down mode to Warth-style
           #   iterative bottom-up mode.
@@ -465,7 +461,7 @@ module Citrus
             # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
             parse_tree = rule.exec(self)
 
-            seed = memo[position]
+            seed = seeds[rule][position]      # at the very least, this will be an empty array; not nil
           
             # if the invocation of the parent rule was a recursive invocation, then memoization has been turned
             # off, so the seed will be nil for this child rule's invocation, but the child rule is also treated as
@@ -482,30 +478,26 @@ module Citrus
             # recursive call returns a 'shorter' result than the previous known one, then by definition
             # it has not used the current seed; in other words, the left-recursion must have exhausted
             # itself.
-            puts "result = #{parse_tree.inspect}"
-            puts "seed = cache[#{rule} - ##{rule.object_id}][#{position}] = #{seed.inspect}"
             if parse_tree.empty? ||                       # case 1: evaluation has failed completely
-               (seed[-1] && parse_tree[-1] <= seed[-1])   # case 2: result consumes less or equal input as the current seed
+               (seed[-1] && parse_tree[-1] <= seed[-1])   # case 2: result consumes less input than (or equal input amount as) the current seed
              
-              memo.delete(position)
+              seeds[rule].delete(position)
             
               puts 'RETURNING'
-              puts "events = #{parse_tree.inspect}"
-              puts "position = #{position}"
-              puts "pos = #{self.pos}"
             
               unless seed.empty?
                 events = seed
                 self.pos = position + events[-1]
+                
+                memo[position] = seed
               end
-              puts "pos = #{self.pos}"
 
               break
             end
-
-            memo[position] = parse_tree
-            longest_match[rule][position] = parse_tree
-          
+            
+            seeds[rule][position] = parse_tree
+            # memo[position] = parse_tree
+            
             # backtrack and run the same rule again
             self.pos = position                   # we must backtrack to the original position, 'position'
           end
@@ -533,13 +525,10 @@ module Citrus
 
       parse_tree = rule.exec(self)
       
+      # if evaluation fails completely (i.e. we have an empty parse tree), then return any memoized result.
       if parse_tree.empty?    # parse failed - but we may have a partial parse tree in the match-stack
-        # if evaluation fails completely (i.e. the seed is an empty parse tree), then
-        # return the second-to-last successful match (i.e. the match that occurred prior to the longest match).
-        # We return the second-to-last match since we'll be returning to the initial invocation
-        # of this rule, and *it* can then successfully match on the longest match, and succeed.
-        if longest_match[rule][position]
-          parse_tree = longest_match[rule][position]
+        if memo[position]
+          parse_tree = memo[position]
           self.pos = position + parse_tree[-1]
         end
       end
@@ -559,17 +548,18 @@ module Citrus
       # end
       
       # only memoize a result if there is no ongoing left-recursion, in any rule
-      if !any_rule_in_left_recursion?
-        puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
-        # Memoize the result so we can use it next time this same rule is
-        # executed at this position.
-        memo[position] = parse_tree
-        # memo_log << [rule, rule_invocation_id]
-      end
+      # if !any_rule_in_left_recursion?
+      #   puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
+      #   # Memoize the result so we can use it next time this same rule is
+      #   # executed at this position.
+      #   memo[position] = parse_tree
+      # end
       
+      # if the parse tree is not empty and either the memoized rule is nil or the parse tree matches more text
+      # than the memoized rule, then memoize the rule with the current parse tree
       if !parse_tree.empty? && 
-         (longest_match[rule][position].nil? || parse_tree[-1] > longest_match[rule][position][-1])
-        longest_match[rule][position] = parse_tree
+         (memo[position].nil? || parse_tree[-1] > memo[position][-1])
+        memo[position] = parse_tree
       end
       
       parse_tree
@@ -590,7 +580,7 @@ module Citrus
       !call_stack_indices[ [rule.hash, position] ].empty?
     end
     
-    def call_stack_rules
+    def call_stack_rule_hashes
       call_stack.map{|rule_position_pair| rule_position_pair.first }
     end
     
@@ -1531,8 +1521,6 @@ module Citrus
         events << length
       else
         puts "FAILED ##{self.object_id} #{self.class} - #{self.name} - #{self.inspect} at position #{input.pos}"
-        puts "n = #{n}"
-        puts "m = #{m}"
       end
 
       events
