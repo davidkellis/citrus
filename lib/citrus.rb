@@ -326,7 +326,6 @@ module Citrus
           self.pos += events[-1]
         end
       else
-        index = events.size
         events = rule.exec(self)
 
         # Memoize the result so we can use it next time this same rule is executed at this position.
@@ -455,8 +454,6 @@ module Citrus
           while true
             puts 'lr rule application'
 
-            # removed_logged_memoizations_occurring_after()
-
             # invoke the same rule another recursive time (the current invocation is the first recursive time)
             # this next invocation will be the 2nd or 3rd or 4th or .... or nth recursive invocation
             parse_tree = rule.exec(self)
@@ -533,20 +530,6 @@ module Citrus
         end
       end
       
-      # if the rule failed, but there is a non-empty memoized AST for this rule
-      # then retry the rule
-      # if parse_tree.size == 0 &&                        # the rule failed
-      #    memo[position] && !memo[position].empty?
-      #    # call_stack_ancestor_has_memoized_result(call_stack_index)
-      #   # i = call_stack_ancestor_has_memoized_result(call_stack_index)
-      #   # memo_rule, memo_pos = call_stack[i]
-      #   # events.concat(cache[memo_rule][memo_pos])
-      #   # self.pos = events[-1]
-      # 
-      #   events = parse_tree = memo[position]
-      #   self.pos = position + parse_tree[-1]
-      # end
-      
       # only memoize a result if there is no ongoing left-recursion, in any rule
       # if !any_rule_in_left_recursion?
       #   puts "memoizing ##{rule.object_id} #{rule.name} - #{rule.inspect} as #{parse_tree} at position #{position}"
@@ -604,7 +587,7 @@ module Citrus
     def any_rule_in_left_recursion?
       call_stack_indices.any? {|rule_position_pair, v| v.size >= 2 }
     end
-
+    
     def call_stack_push(rule, position)
       rule_pos_pair = [rule.hash, position]
       

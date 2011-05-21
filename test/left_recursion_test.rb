@@ -81,8 +81,37 @@ class LeftRecursionTest < Test::Unit::TestCase
     assert(match)
     assert_equal("3-4-5", match)
     
-    match = BigLR.parse("5*4-5", {:left_recurse=>true})
+    match = BigLR.parse("5*4-5-3-18*228", {:left_recurse=>true})
     assert(match)
-    assert_equal("5*4-5", match)
+    assert_equal("5*4-5-3-18*228", match)
   end
+  
+  grammar :BigLR2 do
+    rule :term do
+      any(all(:term, '+', :term),
+          all(:term, '-', :term),
+          :fact)
+    end
+  
+    rule :fact do
+      any(all(:fact, '*', :fact),
+          all(:fact, '/', :fact),
+          :num)
+    end
+  
+    rule :num do
+      /[0-9]+/
+    end
+  end
+  
+  def test_big_lr2
+    match = BigLR2.parse("3-4-5", {:left_recurse=>true})
+    assert(match)
+    assert_equal("3-4-5", match)
+    
+    match = BigLR2.parse("5*4-5-3-18*228", {:left_recurse=>true})
+    assert(match)
+    assert_equal("5*4-5-3-18*228", match)
+  end
+  
 end
